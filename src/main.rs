@@ -9,5 +9,10 @@ fn main() {
         Ok(_) => println!("Successful binding with interface!"),
         Err(err) => eprintln!("{}", err),
     };
-    read_from_socket(socket, 1024);
+
+    let fd = create_tap_device("tap").unwrap();
+    let rx = read_from_socket(fd, 1024);
+    loop {
+        println!("{:?}", rx.recv().unwrap());
+    }
 }
