@@ -9,4 +9,5 @@ edition = "2018"
 [dependencies]
 libc = "0.2"
 nix = "0.18.0"
-socket = "0.0.7"
+ifstructs = "0.1.1"
+ioctl-macros = "0.1.0"
