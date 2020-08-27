@@ -1,10 +1,12 @@
 #[macro_use]
 extern crate ioctl_macros;
 use std::{process, thread, time};
+mod arp;
 mod ethernet;
 mod net_util;
 mod tap;
-pub use ethernet::*;
+use arp::ARP;
+use ethernet::{EtherType, Ethernet};
 
 pub fn show_error<T>(err: T) -> !
 where
@@ -42,14 +44,15 @@ pub fn start_stack() {
         let dst = current_frame.dst();
         let eth_type = current_frame.ether_type();
         let payload = current_frame.payload();
-
-        // let s = String::from_utf8_lossy(payload);
-        if eth_type == 0x806 {
-            println!("Arp req!");
-        }
-        println!("src: {:x?}", src);
-        println!("dst: {:x?}", dst);
-        println!("type: {:x?}", eth_type);
-        println!("payload: {:x?}", payload);
+        match EtherType::from_bytes(eth_type) {
+            EtherType::ARP => {
+                // TODO: Avoid new heap allocation for request parsing.
+                let arp_req = ARP::new_request(payload.to_owned());
+                let arq_response = arp_req.build_response(&eth);
+                eth.write_frame(&arq_response, &current_frame).unwrap();
+            }
+            EtherType::IPv4 => {}
+            _ => continue,
+        };
     }
 }

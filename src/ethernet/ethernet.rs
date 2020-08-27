@@ -1,10 +1,34 @@
+use crate::arp::ARP;
+use crate::net_util;
 use crate::tap::tap_device::MTU;
+use byteorder::{ByteOrder, LittleEndian};
 use libc::{c_void, size_t};
 use nix::errno;
 use nix::sys::stat::fstat;
 use nix::sys::stat::SFlag;
+use rand::Rng;
 use std::sync::mpsc::channel;
 use std::thread;
+
+#[derive(Debug, PartialEq)]
+pub enum EtherType {
+    IPv4,
+    ARP,
+    IPv6,
+    Unsupported,
+}
+
+impl EtherType {
+    pub fn from_bytes(input: [u8; 2]) -> Self {
+        let inp_repr = LittleEndian::read_u16(&input) as i32;
+        match inp_repr {
+            0x800 => Self::IPv4,
+            0x806 => Self::ARP,
+            0x86DD => Self::IPv6,
+            _ => Self::Unsupported,
+        }
+    }
+}
 
 enum State {
     Ready,
@@ -14,6 +38,7 @@ enum State {
 pub struct Ethernet {
     socket: i32,
     status: State,
+    address: [u8; 6],
 }
 
 pub struct EthernetFrame {
@@ -31,11 +56,12 @@ impl EthernetFrame {
         src.copy_from_slice(&self.data[6..12]);
         src
     }
-    pub fn ether_type(&self) -> u16 {
+    pub fn ether_type(&self) -> [u8; 2] {
         let mut ether_type = [0; 2];
         ether_type.copy_from_slice(&self.data[12..14]);
-        (ether_type[0] as u16) << 8 | (ether_type[1] as u16)
+        net_util::ntohs(ether_type)
     }
+
     pub fn payload(&self) -> &[u8] {
         &self.data[14..]
     }
@@ -51,9 +77,42 @@ impl Ethernet {
             Ok(_) => Ok(Ethernet {
                 socket: fd,
                 status: State::Ready,
+                address: rand::thread_rng().gen::<[u8; 6]>(),
             }),
             Err(err) => Err(err),
         }
+    }
+
+    // TODO: trait bounds based generics for payload.
+    pub fn write_frame(
+        &self,
+        payload: &ARP,
+        eth_frame: &EthernetFrame,
+    ) -> Result<(), &'static str> {
+        let mut response = eth_frame.data.clone();
+        // Set dst as the src for the resp frame
+        let _: Vec<_> = response
+            .splice(0..6, eth_frame.src().iter().cloned())
+            .collect();
+        // Set src for the resp frame
+        let _: Vec<_> = response
+            .splice(6..12, self.address.iter().cloned())
+            .collect();
+        // Write payload
+        let _: Vec<_> = response
+            .splice(14.., payload.data().iter().cloned())
+            .collect();
+        match self.write_to_socket(response) {
+            Ok(bytes_written) => {
+                println!("Successfully written {} bytes", bytes_written);
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn hw_address(&self) -> [u8; 6] {
+        self.address
     }
 
     fn socket_valid(fd: i32) -> Result<(), &'static str> {
@@ -98,5 +157,42 @@ impl Ethernet {
             }
         });
         return rx;
+    }
+
+    pub fn write_to_socket(&self, mut payload: Vec<u8>) -> Result<usize, &'static str> {
+        let payload_buffer_ptr = payload.as_mut_ptr() as *mut c_void;
+        unsafe {
+            let res = libc::write(self.socket, payload_buffer_ptr, payload.len() as size_t);
+            if res < 0 {
+                let err = errno::Errno::last();
+                eprintln!("{}", err.desc());
+                Err(err.desc())
+            } else {
+                Ok(res as usize)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test_ether_type() {
+        // Ipv4
+        let input = EtherType::from_bytes([0x0, 0x8]);
+        assert_eq!(input, EtherType::IPv4);
+
+        // ARP
+        let input = EtherType::from_bytes([0x6, 0x8]);
+        assert_eq!(input, EtherType::ARP);
+
+        // Ipv6
+        let input = EtherType::from_bytes([0xDD, 0x86]);
+        assert_eq!(input, EtherType::IPv6);
+
+        // EtherCAT Protocol, Unsupported - What the hell is that ?? :D
+        let input = EtherType::from_bytes([0xA4, 0x88]);
+        assert_eq!(input, EtherType::Unsupported);
     }
 }

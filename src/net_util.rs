@@ -1,8 +1,24 @@
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use libc::{c_int, c_void, setsockopt, size_t, socket, socklen_t};
 use nix::errno;
 use std::ffi::CString;
 use std::sync::mpsc::channel;
 use std::thread;
+
+// Swap bytes from big endian to little endian
+#[inline]
+pub fn ntohs(input: [u8; 2]) -> [u8; 2] {
+    let mut result = [0; 2];
+    LittleEndian::write_u16(&mut result, (input[0] as u16) << 8 | (input[1] as u16));
+    result
+}
+
+#[inline]
+pub fn htons(input: [u8; 2]) -> [u8; 2] {
+    let mut result = [0; 2];
+    BigEndian::write_u16(&mut result, (input[0] as u16) << 8 | (input[1] as u16));
+    result
+}
 
 pub fn create_link_layer_socket() -> Result<c_int, &'static str> {
     let fd;

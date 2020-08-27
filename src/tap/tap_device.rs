@@ -41,7 +41,7 @@ pub fn create_tap_device(device_name: &str) -> Result<(i32, String), &'static st
             return Err(err.desc());
         }
         _ => {
-            // IOCTL can modify the device name if it already exists, hence we might return it back.
+            // IOCTL can modify the device name if it already exists, hence we need to return it back.
             // Ex: If we pass 'TAP1' as the device name and if another device exists with the same name,
             // the kernel might modify the name to 'TAP2'.
             let interface_name = ifr.get_name().unwrap();
@@ -72,7 +72,7 @@ pub fn add_ip_route(device_name: &str, cidr_range: &str) -> Result<(), String> {
 fn execute_command(cmd: &mut Command) -> Result<(), String> {
     let output = match cmd.output() {
         Ok(res) => res,
-        Err(_) => return Err("Failed to invoke /sbin/ip! Is it installed?".to_owned()),
+        Err(_) => return Err("Failed to invoke /sbin/ip! Is it installed?".to_string()),
     };
 
     if output.status.success() {
