@@ -6,10 +6,13 @@ use nix::errno;
 use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
 use std::mem;
+use std::process::Command;
+
+pub const MTU: u32 = 1600;
 
 // Need to refactor error handling :/
 
-pub fn create_tap_device(device_name: &'static str) -> Result<i32, &'static str> {
+pub fn create_tap_device(device_name: &str) -> Result<(i32, String), &'static str> {
     let fd = match open("/dev/net/tap", OFlag::O_RDWR, Mode::empty()).unwrap() {
         fd if fd > 0 => fd,
         _ => {
@@ -37,6 +40,44 @@ pub fn create_tap_device(device_name: &'static str) -> Result<i32, &'static str>
             let err = errno::Errno::last();
             return Err(err.desc());
         }
-        _ => Ok(fd),
+        _ => {
+            // IOCTL can modify the device name if it already exists, hence we might return it back.
+            // Ex: If we pass 'TAP1' as the device name and if another device exists with the same name,
+            // the kernel might modify the name to 'TAP2'.
+            let interface_name = ifr.get_name().unwrap();
+            Ok((fd, interface_name))
+        }
+    }
+}
+
+pub fn set_device_link_up(device_name: &str) -> Result<(), String> {
+    let mut executor = Command::new("/sbin/ip");
+    executor.arg("link").arg("set").arg(device_name).arg("up");
+
+    execute_command(&mut executor)
+}
+
+pub fn add_ip_route(device_name: &str, cidr_range: &str) -> Result<(), String> {
+    let mut executor = Command::new("/sbin/ip");
+    executor
+        .arg("addr")
+        .arg("add")
+        .arg(cidr_range)
+        .arg("dev")
+        .arg(device_name);
+
+    execute_command(&mut executor)
+}
+
+fn execute_command(cmd: &mut Command) -> Result<(), String> {
+    let output = match cmd.output() {
+        Ok(res) => res,
+        Err(_) => return Err("Failed to invoke /sbin/ip! Is it installed?".to_owned()),
+    };
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
