@@ -1,4 +1,3 @@
-use crate::arp::ARP;
 use crate::net_util;
 use crate::tap::tap_device::MTU;
 use byteorder::{ByteOrder, LittleEndian};
@@ -9,6 +8,10 @@ use nix::sys::stat::SFlag;
 use rand::Rng;
 use std::sync::mpsc::channel;
 use std::thread;
+
+pub trait LinkLayerWritable {
+    fn data(&self) -> &Vec<u8>;
+}
 
 #[derive(Debug, PartialEq)]
 pub enum EtherType {
@@ -30,6 +33,9 @@ impl EtherType {
     }
 }
 
+pub type HwAddr = [u8; 6];
+
+// This doesnt do anything useful now. Maybe later?
 enum State {
     Ready,
     Reading,
@@ -38,7 +44,7 @@ enum State {
 pub struct Ethernet {
     socket: i32,
     status: State,
-    address: [u8; 6],
+    address: HwAddr,
 }
 
 pub struct EthernetFrame {
@@ -46,12 +52,26 @@ pub struct EthernetFrame {
 }
 
 impl EthernetFrame {
-    pub fn dst(&self) -> [u8; 6] {
+    // Builds a response eth frame from for a given eth frame. The src address of the given frame would be set as
+    // dst address of the returned response.
+    pub fn build_response_frame<T>(&self, payload: &T) -> Self
+    where
+        T: LinkLayerWritable,
+    {
+        let mut response = self.data.clone();
+        // Set resp frame's dst as the req frame's src.
+        response.splice(0..6, self.src().iter().cloned());
+        // Write payload
+        response.splice(14.., payload.data().iter().cloned());
+        Self { data: response }
+    }
+
+    pub fn dst(&self) -> HwAddr {
         let mut dst = [0; 6];
         dst.copy_from_slice(&self.data[0..6]);
         dst
     }
-    pub fn src(&self) -> [u8; 6] {
+    pub fn src(&self) -> HwAddr {
         let mut src = [0; 6];
         src.copy_from_slice(&self.data[6..12]);
         src
@@ -68,6 +88,10 @@ impl EthernetFrame {
 }
 
 impl Ethernet {
+    pub fn address(&self) -> HwAddr {
+        self.address
+    }
+
     fn set_socket_state(&mut self, to_state: State) {
         self.status = to_state
     }
@@ -77,32 +101,18 @@ impl Ethernet {
             Ok(_) => Ok(Ethernet {
                 socket: fd,
                 status: State::Ready,
-                address: rand::thread_rng().gen::<[u8; 6]>(),
+                address: rand::thread_rng().gen::<HwAddr>(),
             }),
             Err(err) => Err(err),
         }
     }
 
     // TODO: trait bounds based generics for payload.
-    pub fn write_frame(
-        &self,
-        payload: &ARP,
-        eth_frame: &EthernetFrame,
-    ) -> Result<(), &'static str> {
-        let mut response = eth_frame.data.clone();
-        // Set dst as the src for the resp frame
-        let _: Vec<_> = response
-            .splice(0..6, eth_frame.src().iter().cloned())
-            .collect();
-        // Set src for the resp frame
-        let _: Vec<_> = response
-            .splice(6..12, self.address.iter().cloned())
-            .collect();
-        // Write payload
-        let _: Vec<_> = response
-            .splice(14.., payload.data().iter().cloned())
-            .collect();
-        match self.write_to_socket(response) {
+    pub fn write_frame(&self, eth_frame: EthernetFrame) -> Result<(), &'static str> {
+        let mut response_frame_data = eth_frame.data;
+        // Set src as of the frame as this device's hw address before sending.
+        response_frame_data.splice(6..12, self.address.iter().cloned());
+        match self.write_to_socket(response_frame_data) {
             Ok(bytes_written) => {
                 println!("Successfully written {} bytes", bytes_written);
                 Ok(())
@@ -111,7 +121,7 @@ impl Ethernet {
         }
     }
 
-    pub fn hw_address(&self) -> [u8; 6] {
+    pub fn hw_address(&self) -> HwAddr {
         self.address
     }
 

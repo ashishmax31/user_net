@@ -64,6 +64,7 @@ pub fn bind_to_device(fd: c_int, interface: &'static str) -> Result<(), &'static
     }
 }
 
+// TODO: Possible memory leaks, need to implement drop trait (Wait for threads to join before exiting)
 pub fn read_from_socket(fd: c_int, mtu: usize) -> std::sync::mpsc::Receiver<std::vec::Vec<u8>> {
     let (tx, rx) = channel();
     let mut buffer: Vec<u8> = vec![0; mtu];
