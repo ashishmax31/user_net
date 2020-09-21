@@ -1,8 +1,7 @@
-use crate::ethernet::{Ethernet, LinkLayerWritable};
-use crate::net_util;
+use crate::ethernet;
 
-const ARP_REPLY_OPCODE: [u8; 2] = [0, 2];
-const ARP_REQ_OPCODE: [u8; 2] = [0, 1];
+const ARP_REPLY_OPCODE: u16 = 2u16;
+const ARP_REQ_OPCODE: u16 = 1u16;
 
 pub struct ARP {
     data: Vec<u8>,
@@ -14,22 +13,33 @@ enum ARPKind {
     Reply,
 }
 
-impl LinkLayerWritable for ARP {
-    fn data(&self) -> &Vec<u8> {
-        &self.data
+impl ethernet::LinkLayerWritable for ARP {
+    fn data(self) -> Vec<u8> {
+        self.data
     }
 }
 
 // Reference: http://www.tcpipguide.com/free/t_ARPMessageFormat.htm
 impl ARP {
-    pub fn build_request(data: Vec<u8>) -> ARP {
+    pub fn process_packet(data: &[u8], eth: &ethernet::Ethernet, frame: &ethernet::EthernetFrame) {
+        let layer_3_response = ARP::handle_packet(data.to_owned(), eth.address());
+        let eth_response_frame = frame.build_response_frame(layer_3_response);
+        eth.write_frame(eth_response_frame).unwrap();
+    }
+
+    fn handle_packet(data: Vec<u8>, eth_addr: [u8; 6]) -> ARP {
+        let req = ARP::build_request(data);
+        req.build_response(eth_addr)
+    }
+
+    fn build_request(data: Vec<u8>) -> ARP {
         ARP {
             data: data,
             kind: ARPKind::Req,
         }
     }
 
-    pub fn build_response(&self, eth_addr: [u8; 6]) -> ARP {
+    fn build_response(&self, eth_addr: [u8; 6]) -> ARP {
         let mut resp = ARP {
             data: self.data.clone(),
             kind: ARPKind::Reply,
@@ -75,7 +85,7 @@ impl ARP {
         // Set reply as the op code.
         self.data.splice(
             self.pln_boundary()..self.op_boundary(),
-            net_util::htons(ARP_REPLY_OPCODE).iter().cloned(),
+            ARP_REPLY_OPCODE.to_be_bytes().iter().cloned(),
         );
     }
 }

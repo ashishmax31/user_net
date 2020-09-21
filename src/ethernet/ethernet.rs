@@ -1,6 +1,6 @@
 use crate::net_util;
 use crate::tap::tap_device::MTU;
-use byteorder::{ByteOrder, LittleEndian};
+use crate::{ipv4::IPv4, ARP};
 use libc::{c_void, size_t};
 use nix::errno;
 use nix::sys::stat::fstat;
@@ -10,7 +10,7 @@ use std::sync::mpsc::channel;
 use std::thread;
 
 pub trait LinkLayerWritable {
-    fn data(&self) -> &Vec<u8>;
+    fn data(self) -> Vec<u8>;
 }
 
 #[derive(Debug, PartialEq)]
@@ -22,9 +22,9 @@ pub enum EtherType {
 }
 
 impl EtherType {
-    pub fn from_bytes(input: [u8; 2]) -> Self {
-        let inp_repr = LittleEndian::read_u16(&input) as i32;
-        match inp_repr {
+    pub fn from_bytes(input: u16) -> Self {
+        let input = input as i32;
+        match input {
             0x800 => Self::IPv4,
             0x806 => Self::ARP,
             0x86DD => Self::IPv6,
@@ -45,6 +45,7 @@ pub struct Ethernet {
     socket: i32,
     status: State,
     address: HwAddr,
+    packet_chan: Option<std::sync::mpsc::Receiver<EthernetFrame>>,
 }
 
 pub struct EthernetFrame {
@@ -54,7 +55,7 @@ pub struct EthernetFrame {
 impl EthernetFrame {
     // Builds a response eth frame from for a given eth frame. The src address of the given frame would be set as
     // dst address of the returned response.
-    pub fn build_response_frame<T>(&self, payload: &T) -> Self
+    pub fn build_response_frame<T>(&self, payload: T) -> Self
     where
         T: LinkLayerWritable,
     {
@@ -76,10 +77,10 @@ impl EthernetFrame {
         src.copy_from_slice(&self.data[6..12]);
         src
     }
-    pub fn ether_type(&self) -> [u8; 2] {
+    pub fn ether_type(&self) -> u16 {
         let mut ether_type = [0; 2];
         ether_type.copy_from_slice(&self.data[12..14]);
-        net_util::ntohs(ether_type)
+        net_util::ntohs(&ether_type)
     }
 
     pub fn payload(&self) -> &[u8] {
@@ -102,21 +103,18 @@ impl Ethernet {
                 socket: fd,
                 status: State::Ready,
                 address: rand::thread_rng().gen::<HwAddr>(),
+                packet_chan: None,
             }),
             Err(err) => Err(err),
         }
     }
 
-    // TODO: trait bounds based generics for payload.
     pub fn write_frame(&self, eth_frame: EthernetFrame) -> Result<(), &'static str> {
         let mut response_frame_data = eth_frame.data;
         // Set src as of the frame as this device's hw address before sending.
         response_frame_data.splice(6..12, self.address.iter().cloned());
         match self.write_to_socket(response_frame_data) {
-            Ok(bytes_written) => {
-                println!("Successfully written {} bytes", bytes_written);
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(err) => Err(err),
         }
     }
@@ -182,6 +180,21 @@ impl Ethernet {
             }
         }
     }
+
+    pub fn process_frame(&self, frame: EthernetFrame) {
+        let eth_type = frame.ether_type();
+        let payload = frame.payload();
+
+        match EtherType::from_bytes(eth_type) {
+            EtherType::ARP => {
+                ARP::process_packet(payload, self, &frame);
+            }
+            EtherType::IPv4 => {
+                IPv4::process_packet(payload, self, &frame);
+            }
+            _ => {}
+        };
+    }
 }
 
 #[cfg(test)]
@@ -190,19 +203,19 @@ mod test {
     #[test]
     fn test_ether_type() {
         // Ipv4
-        let input = EtherType::from_bytes([0x0, 0x8]);
+        let input = EtherType::from_bytes(0x800);
         assert_eq!(input, EtherType::IPv4);
 
         // ARP
-        let input = EtherType::from_bytes([0x6, 0x8]);
+        let input = EtherType::from_bytes(0x806);
         assert_eq!(input, EtherType::ARP);
 
         // Ipv6
-        let input = EtherType::from_bytes([0xDD, 0x86]);
+        let input = EtherType::from_bytes(0x86DD);
         assert_eq!(input, EtherType::IPv6);
 
         // EtherCAT Protocol, Unsupported - What the hell is that ?? :D
-        let input = EtherType::from_bytes([0xA4, 0x88]);
+        let input = EtherType::from_bytes(0xA488);
         assert_eq!(input, EtherType::Unsupported);
     }
 }
