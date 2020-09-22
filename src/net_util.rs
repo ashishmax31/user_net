@@ -34,12 +34,8 @@ pub fn compute_ip_checksum(packet: &[u8], checksum_range: std::ops::Range<usize>
     }
 
     let mut sum = packet_clone.chunks(2).fold(0u32, |mut sum, vals| {
-        // Arrange in little endian byte order before casting the pointer to u16
-        let val_ptr = [vals[1], vals[0]].as_ptr();
-        unsafe {
-            let curr_val = *(val_ptr as *const u16);
-            sum += curr_val as u32;
-        }
+        let curr_val = u16::from_be_bytes(vals.try_into().unwrap());
+        sum += curr_val as u32;
         sum
     });
     // Add the overflowed 'carry's if present
