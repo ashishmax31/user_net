@@ -96,6 +96,13 @@ impl IPv4 {
         packet_buffer
     }
 
+    pub fn src_str(&self) -> String {
+        format!(
+            "{}.{}.{}.{}",
+            self.src[0], self.src[1], self.src[2], self.src[3]
+        )
+    }
+
     fn get_proto_val(&self) -> u8 {
         match self.proto {
             Protocol::TCP => TCP,

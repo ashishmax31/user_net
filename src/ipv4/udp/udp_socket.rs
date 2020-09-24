@@ -11,19 +11,45 @@ lazy_static! {
     static ref SOCKETS: Mutex<HashMap<String, Arc<Mutex<UdpSocket>>>> = Mutex::new(HashMap::new());
 }
 
-#[derive(Debug, Clone)]
-struct UdpSocket {
+#[derive(Clone)]
+pub struct UdpSocket {
     addr: std::net::SocketAddr,
     addr_identifier: String,
-    buffer: Vec<u8>,
-    max_buffer_size: u16,
+    buffer: Vec<payload_buff>,
+    max_buff_size: u16,
 }
 
-struct UdpSocketIdentifier {
-    identifier: String,
+#[derive(Clone)]
+struct payload_buff {
+    payload: Vec<u8>,
+    from: UdpSocketIdentifier,
+}
+
+#[derive(Clone)]
+pub struct UdpSocketIdentifier(String);
+
+pub fn get_sock(identifier: &str) -> Option<std::sync::Arc<std::sync::Mutex<UdpSocket>>> {
+    let created_sockets = SOCKETS.lock().unwrap();
+    if created_sockets.contains_key(identifier) {
+        let mutex_wrapped_socket = Arc::clone(created_sockets.get(identifier).unwrap());
+        Some(mutex_wrapped_socket)
+    } else {
+        None
+    }
 }
 
 impl UdpSocket {
+    pub fn write_to_sockbuff(&mut self, payload: Vec<u8>, from: String) {
+        if (self.buffer.len() as u16) < self.max_buff_size {
+            self.buffer.push(payload_buff {
+                payload: payload,
+                from: UdpSocketIdentifier(from),
+            });
+        };
+        // Buffer full
+        // Drop packet
+    }
+
     pub fn bind<A: std::net::ToSocketAddrs>(
         addr_str: A,
     ) -> Result<UdpSocketIdentifier, std::io::Error> {
@@ -32,9 +58,7 @@ impl UdpSocket {
         let (ip_addr, port) = Self::sock_addr_parse(&sock_addr)?;
         let identifier = format!("{}:{}", ip_addr, port);
         Self::add_to_created_sockets(sock_addr, identifier.clone())?;
-        Ok(UdpSocketIdentifier {
-            identifier: identifier,
-        })
+        Ok(UdpSocketIdentifier(identifier))
     }
 
     fn sock_addr_parse(sock_addr: &std::net::SocketAddr) -> Result<(String, u16), std::io::Error> {
@@ -65,21 +89,11 @@ impl UdpSocket {
             let socket = UdpSocket {
                 addr: addr,
                 addr_identifier: identifier.clone(),
-                buffer: Vec::with_capacity(1000),
-                max_buffer_size: 1000,
+                buffer: Vec::new(),
+                max_buff_size: 10000,
             };
             created_sockets.insert(identifier, Arc::new(Mutex::new(socket)));
         }
         Ok(())
-    }
-
-    fn get_sock(identifier: &str) -> Option<std::sync::Arc<std::sync::Mutex<UdpSocket>>> {
-        let created_sockets = SOCKETS.lock().unwrap();
-        if created_sockets.contains_key(identifier) {
-            let mutex_wrapped_socket = Arc::clone(created_sockets.get(identifier).unwrap());
-            Some(mutex_wrapped_socket)
-        } else {
-            None
-        }
     }
 }
