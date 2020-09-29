@@ -1,6 +1,9 @@
 use crate::net_util;
 use crate::tap::tap_device::MTU;
-use crate::{ipv4::IPv4, ARP};
+use crate::{
+    ipv4::{initialize_ipv4_stack, IPstackWriter, IPv4},
+    ARP,
+};
 use libc::{c_void, size_t};
 use nix::errno;
 use nix::sys::stat::fstat;
@@ -34,20 +37,24 @@ impl EtherType {
 }
 
 pub type HwAddr = [u8; 6];
+type ChannelReceiver = std::sync::mpsc::Receiver<EthernetFrame>;
+pub type ChannelWriter = std::sync::mpsc::Sender<EthernetFrame>;
 
 // This doesnt do anything useful now. Maybe later?
+#[derive(Clone)]
 enum State {
     Ready,
     Reading,
 }
-
+#[derive(Clone)]
 pub struct Ethernet {
     socket: i32,
     status: State,
     address: HwAddr,
-    packet_chan: Option<std::sync::mpsc::Receiver<EthernetFrame>>,
+    write_chan: ChannelWriter,
 }
 
+#[derive(Debug, Clone)]
 pub struct EthernetFrame {
     data: Vec<u8>,
 }
@@ -99,14 +106,27 @@ impl Ethernet {
 
     pub fn bind(fd: i32) -> Result<Ethernet, &'static str> {
         match Ethernet::socket_valid(fd) {
-            Ok(_) => Ok(Ethernet {
-                socket: fd,
-                status: State::Ready,
-                address: rand::thread_rng().gen::<HwAddr>(),
-                packet_chan: None,
-            }),
+            Ok(_) => {
+                let (tx, rx) = channel::<EthernetFrame>();
+                let eth = Ethernet {
+                    socket: fd,
+                    status: State::Ready,
+                    address: rand::thread_rng().gen::<HwAddr>(),
+                    write_chan: tx,
+                };
+
+                Self::intialize_writer_loop(eth.clone(), rx);
+                Ok(eth)
+            }
             Err(err) => Err(err),
         }
+    }
+
+    fn intialize_writer_loop(eth: Ethernet, rx: ChannelReceiver) {
+        thread::spawn(move || loop {
+            let packet_to_write = rx.recv().unwrap();
+            eth.write_frame(packet_to_write).unwrap();
+        });
     }
 
     pub fn write_frame(&self, eth_frame: EthernetFrame) -> Result<(), &'static str> {
@@ -141,33 +161,53 @@ impl Ethernet {
         }
     }
 
-    pub fn read_from_socket(&mut self) -> std::sync::mpsc::Receiver<EthernetFrame> {
+    pub fn read_from_socket(&self) -> (std::sync::mpsc::Receiver<EthernetFrame>, IPstackWriter) {
         let mut buffer: Vec<u8> = vec![0; MTU as usize];
-        let (tx, rx) = channel();
         let fd = self.socket;
-        self.set_socket_state(State::Reading);
-
-        thread::spawn(move || {
+        // self.set_socket_state(State::Reading);
+        let ipstack_writer = initialize_ipv4_stack(self.write_chan.clone());
+        let (tx, rx) = channel();
+        std::thread::spawn(move || loop {
             let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
-            loop {
-                unsafe {
-                    let res = libc::read(fd, buffer_ptr, buffer.capacity() as size_t);
-                    if res < 0 {
-                        let err = errno::Errno::last();
-                        eprintln!("{}", err.desc());
-                        panic!(err.desc());
-                    } else {
-                        let raw_payload = buffer[0..res as usize].to_vec();
-                        let eth_frame = EthernetFrame { data: raw_payload };
-                        tx.send(eth_frame).unwrap();
-                    }
+            unsafe {
+                let res = libc::read(fd, buffer_ptr, buffer.capacity() as size_t);
+                if res < 0 {
+                    let err = errno::Errno::last();
+                    eprintln!("{}", err.desc());
+                    panic!(err.desc());
+                } else {
+                    let raw_payload = buffer[0..res as usize].to_vec();
+                    let eth_frame = EthernetFrame { data: raw_payload };
+                    tx.send(eth_frame).unwrap();
                 }
             }
         });
-        return rx;
+        (rx, ipstack_writer)
     }
 
-    pub fn write_to_socket(&self, mut payload: Vec<u8>) -> Result<usize, &'static str> {
+    pub fn start_stack(&self) {
+        let mut buffer: Vec<u8> = vec![0; MTU as usize];
+        let fd = self.socket;
+        // self.set_socket_state(State::Reading);
+        let ipstack_writer = initialize_ipv4_stack(self.write_chan.clone());
+        let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
+        loop {
+            unsafe {
+                let res = libc::read(fd, buffer_ptr, buffer.capacity() as size_t);
+                if res < 0 {
+                    let err = errno::Errno::last();
+                    eprintln!("{}", err.desc());
+                    panic!(err.desc());
+                } else {
+                    let raw_payload = buffer[0..res as usize].to_vec();
+                    let eth_frame = EthernetFrame { data: raw_payload };
+                    self.process_frame(eth_frame, &ipstack_writer);
+                }
+            }
+        }
+    }
+
+    fn write_to_socket(&self, mut payload: Vec<u8>) -> Result<usize, &'static str> {
         let payload_buffer_ptr = payload.as_mut_ptr() as *mut c_void;
         unsafe {
             let res = libc::write(self.socket, payload_buffer_ptr, payload.len() as size_t);
@@ -181,16 +221,15 @@ impl Ethernet {
         }
     }
 
-    pub fn process_frame(&self, frame: EthernetFrame) {
+    pub fn process_frame(&self, frame: EthernetFrame, ipstack_writer: &IPstackWriter) {
         let eth_type = frame.ether_type();
-        let payload = frame.payload();
 
         match EtherType::from_bytes(eth_type) {
             EtherType::ARP => {
-                ARP::process_packet(payload, self, &frame);
+                ARP::process_packet(self, frame);
             }
             EtherType::IPv4 => {
-                IPv4::process_packet(payload, self, &frame);
+                IPv4::process_packet(self, frame, ipstack_writer);
             }
             _ => {}
         };

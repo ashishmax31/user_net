@@ -33,14 +33,9 @@ pub fn start_stack() {
         Err(err) => show_error(err),
     }
 
-    let mut eth = match Ethernet::bind(fd) {
-        Ok(fd) => fd,
+    let eth = match Ethernet::bind(fd) {
+        Ok(eth) => eth,
         Err(err) => show_error(err),
     };
-
-    let rx = eth.read_from_socket();
-    loop {
-        let current_frame = rx.recv().unwrap();
-        eth.process_frame(current_frame);
-    }
+    eth.start_stack();
 }

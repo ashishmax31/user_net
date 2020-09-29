@@ -15,12 +15,12 @@ lazy_static! {
 pub struct UdpSocket {
     addr: std::net::SocketAddr,
     addr_identifier: String,
-    buffer: Vec<payload_buff>,
+    buffer: Vec<PayloadBuff>,
     max_buff_size: u16,
 }
 
 #[derive(Clone)]
-struct payload_buff {
+struct PayloadBuff {
     payload: Vec<u8>,
     from: UdpSocketIdentifier,
 }
@@ -41,13 +41,12 @@ pub fn get_sock(identifier: &str) -> Option<std::sync::Arc<std::sync::Mutex<UdpS
 impl UdpSocket {
     pub fn write_to_sockbuff(&mut self, payload: Vec<u8>, from: String) {
         if (self.buffer.len() as u16) < self.max_buff_size {
-            self.buffer.push(payload_buff {
+            self.buffer.push(PayloadBuff {
                 payload: payload,
                 from: UdpSocketIdentifier(from),
             });
         };
-        // Buffer full
-        // Drop packet
+        // Buffer full, drop the packet.
     }
 
     pub fn bind<A: std::net::ToSocketAddrs>(

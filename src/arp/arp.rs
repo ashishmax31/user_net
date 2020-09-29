@@ -21,7 +21,8 @@ impl ethernet::LinkLayerWritable for ARP {
 
 // Reference: http://www.tcpipguide.com/free/t_ARPMessageFormat.htm
 impl ARP {
-    pub fn process_packet(data: &[u8], eth: &ethernet::Ethernet, frame: &ethernet::EthernetFrame) {
+    pub fn process_packet(eth: &ethernet::Ethernet, frame: ethernet::EthernetFrame) {
+        let data = frame.payload();
         let layer_3_response = ARP::handle_packet(data.to_owned(), eth.address());
         let eth_response_frame = frame.build_response_frame(layer_3_response);
         eth.write_frame(eth_response_frame).unwrap();

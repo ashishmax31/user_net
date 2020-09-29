@@ -3,10 +3,21 @@ use crate::ipv4::icmp;
 use crate::net_util;
 use crate::tap::tap_device::MTU;
 use std::convert::TryInto;
+use std::sync::mpsc::channel;
+use std::thread;
+
+pub struct IPstackWriter(std::sync::mpsc::Sender<Layer4Response>);
+
+#[derive(Debug, Clone)]
+pub struct Layer4Response {
+    pub data: Vec<u8>,
+    pub protocol: u8,
+    pub src_ethernet_frame: ethernet::EthernetFrame,
+}
 
 // No bit fields :(
 // MSB 0 bit numbering
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IPv4 {
     version: u8,
     ihl: u8,
@@ -27,7 +38,7 @@ const ICMP: u8 = 1;
 const TCP: u8 = 6;
 const UDP: u8 = 17;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Protocol {
     ICMP,
     TCP,
@@ -41,20 +52,27 @@ impl ethernet::LinkLayerWritable for IPv4 {
     }
 }
 
+impl IPstackWriter {
+    pub fn write(&self, packet_to_write: Layer4Response) {
+        self.0.send(packet_to_write).unwrap();
+    }
+}
+
 impl IPv4 {
     pub fn process_packet(
-        payload: &[u8],
         eth: &ethernet::Ethernet,
-        frame: &ethernet::EthernetFrame,
+        frame: ethernet::EthernetFrame,
+        ipv4_stack_writer: &IPstackWriter,
     ) {
-        if let Some(layer_3_response) = IPv4::handle_packet(payload) {
-            let eth_response_frame = frame.build_response_frame(layer_3_response);
-            eth.write_frame(eth_response_frame).unwrap();
-        }
+        IPv4::handle_frame(frame, ipv4_stack_writer);
+    }
+
+    pub fn payload_bytes(&self) -> &[u8] {
+        &self.data
     }
     // MSB 0 bit numbering
     // First n bytes means the the first n bytes from the left to right.
-    fn packet_from_net_bytes(data: &[u8]) -> IPv4 {
+    pub fn packet_from_net_bytes(data: &[u8]) -> IPv4 {
         let parsed_packet = IPv4 {
             version: net_util::get_bits(data[0], 4..8),
             ihl: net_util::get_bits(data[0], 0..4),
@@ -131,45 +149,63 @@ impl IPv4 {
         }
     }
 
-    fn handle_packet(data: &[u8]) -> Option<IPv4> {
-        let received_packet = IPv4::packet_from_net_bytes(data);
+    fn build_ipv4_response(src_ip_packet: IPv4, payload: Vec<u8>, protocol: u8) -> IPv4 {
+        if (payload.len() as u32) > MTU {
+            // Need to implement ip packet fragmenting
+            unimplemented!()
+        } else {
+            IPv4::build_unfragmented_packet(src_ip_packet, payload, protocol)
+        }
+    }
 
-        match received_packet.proto {
+    fn handle_frame(frame: ethernet::EthernetFrame, ipv4_stack: &IPstackWriter) {
+        let protocol = IPv4::protocol_from_ip_bytes(frame.payload());
+
+        match protocol {
             Protocol::ICMP => {
-                match icmp::ICMP::process_packet(&received_packet.data) {
-                    Some(icmp_resp) => {
-                        if (icmp_resp.len() as u32) > MTU {
-                            // Need to implement ip packet fragmenting
-                            unimplemented!()
-                        } else {
-                            Some(IPv4::build_unfragmented_packet(
-                                received_packet,
-                                icmp_resp,
-                                ICMP,
-                            ))
-                        }
-                    }
-                    None => {
-                        // Send ICMP error back?
-                        // Write to some logs
-                        None
-                    }
-                }
+                icmp::ICMP::process_packet(frame, ipv4_stack);
             }
             Protocol::UDP => {
                 //  TODO: UDP
-                None
             }
             Protocol::TCP => {
                 // TODO: TCP
-                None
             }
             Protocol::Unsupported => {
                 // Send ICMP error
-                None
             }
         }
     }
+
+    fn protocol_from_ip_bytes(ipv4_bytes: &[u8]) -> Protocol {
+        set_proto(ipv4_bytes[9])
+    }
+}
+
+pub fn initialize_ipv4_stack(eth_writer: ethernet::ChannelWriter) -> IPstackWriter {
+    let (tx, rx) = channel::<Layer4Response>();
+    intialize_writer_loop(eth_writer, rx);
+    IPstackWriter(tx)
+}
+
+fn intialize_writer_loop(
+    eth_writer: ethernet::ChannelWriter,
+    rx: std::sync::mpsc::Receiver<Layer4Response>,
+) {
+    thread::spawn(move || loop {
+        let packet_to_write = rx.recv().unwrap();
+        let src_ip_packet =
+            IPv4::packet_from_net_bytes(packet_to_write.src_ethernet_frame.payload());
+        let ip_resp_packet = IPv4::build_ipv4_response(
+            src_ip_packet,
+            packet_to_write.data,
+            packet_to_write.protocol,
+        );
+        let link_layer_resp = packet_to_write
+            .src_ethernet_frame
+            .build_response_frame(ip_resp_packet);
+        eth_writer.send(link_layer_resp).unwrap();
+    });
 }
 
 fn set_proto(byte: u8) -> Protocol {

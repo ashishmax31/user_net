@@ -1,3 +1,5 @@
+use crate::ethernet;
+use crate::ipv4::*;
 use crate::net_util;
 
 pub struct ICMP {
@@ -10,6 +12,8 @@ pub struct ICMP {
 
 const ECHO_REPLY: u8 = 0u8;
 const ECHO_REQ: u8 = 8u8;
+
+const ICMP: u8 = 1;
 
 pub enum IcmpType {
     EchoReply,
@@ -69,18 +73,24 @@ impl ICMP {
         reply
     }
 
-    pub fn process_packet(data: &[u8]) -> Option<Vec<u8>> {
-        if let Some(icmp_packet) = ICMP::packet_from_bytes(data) {
-            match icmp_packet.icmp_type() {
+    pub fn process_packet(frame: ethernet::EthernetFrame, layer_3_writer: &IPstackWriter) {
+        let ipv4_packet = IPv4::packet_from_net_bytes(frame.payload());
+        let icmp_reply = match ICMP::packet_from_bytes(ipv4_packet.payload_bytes()) {
+            Some(icmp_packet) => match icmp_packet.icmp_type() {
                 IcmpType::EchoRequest => {
                     let reply = ICMP::build_icmp_echo_reply(icmp_packet);
-                    Some(reply.packet_to_bytes())
+                    reply.packet_to_bytes()
                 }
                 _ => unimplemented!(),
-            }
-        } else {
-            // Drop the packet if the packet checksum doesnt match
-            None
-        }
+            },
+            None => return, // Checksum mismatch, dont do anything
+        };
+
+        let layer4_resp = ipv4::Layer4Response {
+            data: icmp_reply,
+            protocol: ICMP,
+            src_ethernet_frame: frame,
+        };
+        layer_3_writer.write(layer4_resp);
     }
 }
