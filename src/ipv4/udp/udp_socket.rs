@@ -1,12 +1,14 @@
 // UDP Sockets API
 
+use crate::ipv4::{IPstackWriter, Layer4Response};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
-// For lack of better options, using a global mutable state here.
+// For lack of better options, using a global mutable states here.
+static mut LAYER3_WRITER: Option<IPstackWriter> = None;
 lazy_static! {
     static ref SOCKETS: Mutex<HashMap<String, Arc<Mutex<UdpSocket>>>> = Mutex::new(HashMap::new());
 }
@@ -17,6 +19,7 @@ pub struct UdpSocket {
     addr_identifier: String,
     buffer: Vec<PayloadBuff>,
     max_buff_size: u16,
+    layer_3_writer: IPstackWriter,
 }
 
 #[derive(Clone)]
@@ -35,6 +38,12 @@ pub fn get_sock(identifier: &str) -> Option<std::sync::Arc<std::sync::Mutex<UdpS
         Some(mutex_wrapped_socket)
     } else {
         None
+    }
+}
+
+pub fn intialize_stack(ip_stack_writer: IPstackWriter) {
+    unsafe {
+        LAYER3_WRITER = Some(ip_stack_writer);
     }
 }
 
@@ -70,7 +79,10 @@ impl UdpSocket {
                 ))
             }
         };
-        let ip_address: String = ip_address.iter().map(|octet| *octet as char).collect();
+        let ip_address: String = format!(
+            "{}.{}.{}.{}",
+            ip_address[0], ip_address[1], ip_address[2], ip_address[3]
+        );
         Ok((ip_address, sock_addr.port()))
     }
 
@@ -85,11 +97,13 @@ impl UdpSocket {
                 "Address or Port already in use!",
             ));
         } else {
+            let ip_stack_writer = unsafe { LAYER3_WRITER.clone().unwrap() };
             let socket = UdpSocket {
                 addr: addr,
                 addr_identifier: identifier.clone(),
                 buffer: Vec::new(),
                 max_buff_size: 10000,
+                layer_3_writer: ip_stack_writer,
             };
             created_sockets.insert(identifier, Arc::new(Mutex::new(socket)));
         }

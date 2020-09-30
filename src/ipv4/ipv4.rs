@@ -1,11 +1,13 @@
 use crate::ethernet;
 use crate::ipv4::icmp;
+use crate::ipv4::udp;
 use crate::net_util;
 use crate::tap::tap_device::MTU;
 use std::convert::TryInto;
 use std::sync::mpsc::channel;
 use std::thread;
 
+#[derive(Debug, Clone)]
 pub struct IPstackWriter(std::sync::mpsc::Sender<Layer4Response>);
 
 #[derive(Debug, Clone)]
@@ -165,9 +167,7 @@ impl IPv4 {
             Protocol::ICMP => {
                 icmp::ICMP::process_packet(frame, ipv4_stack);
             }
-            Protocol::UDP => {
-                //  TODO: UDP
-            }
+            Protocol::UDP => udp::UDP::process_packet(frame, ipv4_stack),
             Protocol::TCP => {
                 // TODO: TCP
             }
@@ -180,11 +180,24 @@ impl IPv4 {
     fn protocol_from_ip_bytes(ipv4_bytes: &[u8]) -> Protocol {
         set_proto(ipv4_bytes[9])
     }
+
+    pub fn src_from_bytes(ip_bytes: &[u8]) -> &[u8] {
+        &ip_bytes[12..16]
+    }
+
+    pub fn dst_from_bytes(ip_bytes: &[u8]) -> &[u8] {
+        &ip_bytes[16..20]
+    }
+
+    pub fn payload_from_bytes(ip_bytes: &[u8]) -> &[u8] {
+        &ip_bytes[20..]
+    }
 }
 
 pub fn initialize_ipv4_stack(eth_writer: ethernet::ChannelWriter) -> IPstackWriter {
     let (tx, rx) = channel::<Layer4Response>();
     intialize_writer_loop(eth_writer, rx);
+    udp::udp_socket::intialize_stack(IPstackWriter(tx.clone()));
     IPstackWriter(tx)
 }
 
