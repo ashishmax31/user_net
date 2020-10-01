@@ -33,7 +33,7 @@ pub fn start_stack() {
         Err(err) => show_error(err),
     }
 
-    let eth = match Ethernet::bind(fd) {
+    let mut eth = match Ethernet::bind(fd) {
         Ok(eth) => eth,
         Err(err) => show_error(err),
     };

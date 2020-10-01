@@ -40,7 +40,7 @@ const ICMP: u8 = 1;
 const TCP: u8 = 6;
 const UDP: u8 = 17;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Protocol {
     ICMP,
     TCP,
@@ -49,8 +49,20 @@ pub enum Protocol {
 }
 
 impl ethernet::LinkLayerWritable for IPv4 {
-    fn data(self) -> Vec<u8> {
+    fn data(&self) -> Vec<u8> {
         self.packet_to_bytes()
+    }
+
+    fn spa(&self) -> ethernet::ProtocolAddr {
+        self.src
+    }
+
+    fn tpa(&self) -> ethernet::ProtocolAddr {
+        self.dst
+    }
+
+    fn ether_type(&self) -> [u8; 2] {
+        (ethernet::ETH_IPV4 as u16).to_be_bytes()
     }
 }
 
@@ -93,7 +105,7 @@ impl IPv4 {
         parsed_packet
     }
 
-    fn packet_to_bytes(mut self) -> Vec<u8> {
+    fn packet_to_bytes(&self) -> Vec<u8> {
         let mut packet_buffer = Vec::new();
         let flag_frag_offset = self.frag_offset | (self.flags as u16);
 
@@ -112,7 +124,7 @@ impl IPv4 {
         let chksum_bytes = checksum.to_be_bytes();
         packet_buffer[10] = chksum_bytes[0];
         packet_buffer[11] = chksum_bytes[1];
-        packet_buffer.append(&mut self.data);
+        packet_buffer.append(&mut self.data.clone());
         packet_buffer
     }
 
@@ -214,10 +226,7 @@ fn intialize_writer_loop(
             packet_to_write.data,
             packet_to_write.protocol,
         );
-        let link_layer_resp = packet_to_write
-            .src_ethernet_frame
-            .build_response_frame(ip_resp_packet);
-        eth_writer.send(link_layer_resp).unwrap();
+        eth_writer.send(Box::new(ip_resp_packet)).unwrap();
     });
 }
 

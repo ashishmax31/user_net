@@ -4,16 +4,32 @@ use crate::{
     ipv4::{initialize_ipv4_stack, IPstackWriter, IPv4},
     ARP,
 };
+use lazy_static::lazy_static;
 use libc::{c_void, size_t};
 use nix::errno;
 use nix::sys::stat::fstat;
 use nix::sys::stat::SFlag;
 use rand::Rng;
+use std::collections::HashMap;
 use std::sync::mpsc::channel;
-use std::thread;
+use std::sync::RwLock;
+use std::{thread, time};
+
+lazy_static! {
+    static ref ARP_CACHE: RwLock<HashMap<ProtocolAddr, HwAddr>> = RwLock::new(HashMap::new());
+}
+
+pub type HwAddr = [u8; 6];
+
+pub type ChannelWriter = std::sync::mpsc::Sender<Box<dyn LinkLayerWritable + Send>>;
+
+pub type ProtocolAddr = [u8; 4];
 
 pub trait LinkLayerWritable {
-    fn data(self) -> Vec<u8>;
+    fn spa(&self) -> ProtocolAddr;
+    fn tpa(&self) -> ProtocolAddr;
+    fn ether_type(&self) -> [u8; 2];
+    fn data(&self) -> Vec<u8>;
 }
 
 #[derive(Debug, PartialEq)]
@@ -24,21 +40,27 @@ pub enum EtherType {
     Unsupported,
 }
 
+type ChannelReceiver = std::sync::mpsc::Receiver<Box<dyn LinkLayerWritable + Send>>;
+
 impl EtherType {
     pub fn from_bytes(input: u16) -> Self {
         let input = input as i32;
         match input {
-            0x800 => Self::IPv4,
-            0x806 => Self::ARP,
-            0x86DD => Self::IPv6,
+            ETH_IPV4 => Self::IPv4,
+            ETH_ARP => Self::ARP,
+            ETH_IPV6 => Self::IPv6,
             _ => Self::Unsupported,
         }
     }
+    pub fn value(&self) -> u16 {
+        match self {
+            Self::IPv4 => ETH_IPV4 as u16,
+            Self::IPv6 => ETH_IPV6 as u16,
+            Self::ARP => ETH_ARP as u16,
+            Self::Unsupported => panic!("Unknown ether_type"),
+        }
+    }
 }
-
-pub type HwAddr = [u8; 6];
-type ChannelReceiver = std::sync::mpsc::Receiver<EthernetFrame>;
-pub type ChannelWriter = std::sync::mpsc::Sender<EthernetFrame>;
 
 // This doesnt do anything useful now. Maybe later?
 #[derive(Clone)]
@@ -46,18 +68,25 @@ enum State {
     Ready,
     Reading,
 }
+
 #[derive(Clone)]
 pub struct Ethernet {
     socket: i32,
     status: State,
     address: HwAddr,
-    write_chan: ChannelWriter,
+    layer3_response_chan: ChannelWriter,
 }
 
 #[derive(Debug, Clone)]
 pub struct EthernetFrame {
     data: Vec<u8>,
 }
+
+const BROADCAST_ADDR: [u8; 6] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+pub const ETH_IPV4: i32 = 0x800;
+pub const ETH_ARP: i32 = 0x806;
+pub const ETH_IPV6: i32 = 0x86DD;
+pub const IP_ADDR: ProtocolAddr = [10, 0, 0, 2];
 
 impl EthernetFrame {
     // Builds a response eth frame from for a given eth frame. The src address of the given frame would be set as
@@ -104,15 +133,15 @@ impl Ethernet {
         self.status = to_state
     }
 
-    pub fn bind(fd: i32) -> Result<Ethernet, &'static str> {
+    pub fn bind(fd: i32) -> Result<Self, &'static str> {
         match Ethernet::socket_valid(fd) {
             Ok(_) => {
-                let (tx, rx) = channel::<EthernetFrame>();
+                let (tx, rx) = channel::<Box<dyn LinkLayerWritable + Send>>();
                 let eth = Ethernet {
                     socket: fd,
                     status: State::Ready,
                     address: rand::thread_rng().gen::<HwAddr>(),
-                    write_chan: tx,
+                    layer3_response_chan: tx,
                 };
 
                 Self::intialize_writer_loop(eth.clone(), rx);
@@ -122,17 +151,75 @@ impl Ethernet {
         }
     }
 
+    pub fn update_arp_cache(&mut self, protocol_addr: ProtocolAddr, hw_addr: HwAddr) {
+        let mut arp_cache_obj = ARP_CACHE.write().unwrap();
+        arp_cache_obj.insert(protocol_addr, hw_addr);
+    }
+
+    pub fn arp_cache_exists(&self, protocol_addr: &ProtocolAddr) -> bool {
+        let arp_cache_obj = ARP_CACHE.read().unwrap();
+        arp_cache_obj.contains_key(protocol_addr)
+    }
+
+    pub fn get_hw_addr_from_cache(&self, protocol_addr: &ProtocolAddr) -> HwAddr {
+        let arp_cache_obj = ARP_CACHE.read().unwrap();
+        *arp_cache_obj.get(protocol_addr).unwrap()
+    }
+
+    pub fn eth_layer_write(
+        &self,
+        payload: std::boxed::Box<dyn LinkLayerWritable + std::marker::Send>,
+    ) -> Result<(), &'static str> {
+        match self.layer3_response_chan.send(payload) {
+            Ok(_) => Ok(()),
+            Err(_) => Err("Failed to write to the eth chan"),
+        }
+    }
+
     fn intialize_writer_loop(eth: Ethernet, rx: ChannelReceiver) {
         thread::spawn(move || loop {
-            let packet_to_write = rx.recv().unwrap();
-            eth.write_frame(packet_to_write).unwrap();
+            let layer3_resp = rx.recv().unwrap();
+            eth.write_response(layer3_resp);
         });
+    }
+
+    fn write_response(&self, layer_3_resp: std::boxed::Box<dyn LinkLayerWritable + Send>) {
+        let target_protocol_addr = layer_3_resp.tpa();
+        if self.arp_cache_exists(&target_protocol_addr) {
+            let dst_hw_addr = self.get_hw_addr_from_cache(&target_protocol_addr);
+            let resp_eth_frame = self.make_response_frame(layer_3_resp, dst_hw_addr);
+            self.write_frame(resp_eth_frame).unwrap();
+        } else {
+            // Make an ARP request, then re-insert the layer3 response to the eth layer writer chan
+            self.make_arp_req_for_addr(target_protocol_addr);
+            // Allow some time for the arp reply to come and get update the arp cache before
+            // re-inserting the layer3 response to the eth layer writer chan
+            thread::sleep(time::Duration::from_millis(10));
+            self.eth_layer_write(layer_3_resp).unwrap();
+        }
+    }
+
+    fn make_arp_req_for_addr(&self, target_protocol_addr: ProtocolAddr) {
+        let arp_req = ARP::make_req_for_addr(target_protocol_addr, &self.address);
+        let eth_frame = self.make_response_frame(arp_req, BROADCAST_ADDR);
+        self.write_frame(eth_frame).unwrap();
+    }
+
+    fn make_response_frame(
+        &self,
+        layer_3_resp: std::boxed::Box<dyn LinkLayerWritable>,
+        dst_hw_addr: HwAddr,
+    ) -> EthernetFrame {
+        let mut resp_frame = Vec::new();
+        resp_frame.extend_from_slice(&dst_hw_addr);
+        resp_frame.extend_from_slice(&self.address);
+        resp_frame.extend_from_slice(&layer_3_resp.ether_type());
+        resp_frame.extend_from_slice(&layer_3_resp.data());
+        EthernetFrame { data: resp_frame }
     }
 
     pub fn write_frame(&self, eth_frame: EthernetFrame) -> Result<(), &'static str> {
         let mut response_frame_data = eth_frame.data;
-        // Set src as of the frame as this device's hw address before sending.
-        response_frame_data.splice(6..12, self.address.iter().cloned());
         match self.write_to_socket(response_frame_data) {
             Ok(_) => Ok(()),
             Err(err) => Err(err),
@@ -165,7 +252,7 @@ impl Ethernet {
         let mut buffer: Vec<u8> = vec![0; MTU as usize];
         let fd = self.socket;
         // self.set_socket_state(State::Reading);
-        let ipstack_writer = initialize_ipv4_stack(self.write_chan.clone());
+        let ipstack_writer = initialize_ipv4_stack(self.layer3_response_chan.clone());
         let (tx, rx) = channel();
         std::thread::spawn(move || loop {
             let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
@@ -185,11 +272,11 @@ impl Ethernet {
         (rx, ipstack_writer)
     }
 
-    pub fn start_stack(&self) {
+    pub fn start_stack(&mut self) {
         let mut buffer: Vec<u8> = vec![0; MTU as usize];
         let fd = self.socket;
         // self.set_socket_state(State::Reading);
-        let ipstack_writer = initialize_ipv4_stack(self.write_chan.clone());
+        let ipstack_writer = initialize_ipv4_stack(self.layer3_response_chan.clone());
         let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
         loop {
             unsafe {
@@ -221,7 +308,7 @@ impl Ethernet {
         }
     }
 
-    pub fn process_frame(&self, frame: EthernetFrame, ipstack_writer: &IPstackWriter) {
+    pub fn process_frame(&mut self, frame: EthernetFrame, ipstack_writer: &IPstackWriter) {
         let eth_type = frame.ether_type();
 
         match EtherType::from_bytes(eth_type) {

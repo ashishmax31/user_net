@@ -9,7 +9,6 @@ use std::mem;
 use std::process::Command;
 
 pub const MTU: u32 = 1600;
-
 // Need to refactor error handling :/
 
 pub fn create_tap_device(device_name: &str) -> Result<(i32, String), &'static str> {
