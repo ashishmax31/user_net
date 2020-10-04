@@ -228,10 +228,9 @@ impl Ethernet {
     pub fn write_frame(&self, eth_frame: EthernetFrame) -> Result<(), &'static str> {
         // Loopback behaviour
         if eth_frame.dst() == self.hw_address() {
-            let l4_stack_writer =  self.l4_packet_write_chan.as_ref().unwrap();
-            self.process_frame(eth_frame, l4_stack_writer);
+            self.process_frame(eth_frame);
             Ok(())
-        }else{
+        } else {
             let response_frame_data = eth_frame.data;
             match self.write_to_socket(response_frame_data) {
                 Ok(_) => Ok(()),
@@ -275,9 +274,10 @@ impl Ethernet {
             address: self.address,
             l3_resp_writer_chan: self.l3_resp_writer_chan.clone(),
             l3_resp_recv_chan: None,
-            l4_packet_write_chan: Some(ipstack_writer.clone())
+            l4_packet_write_chan: Some(ipstack_writer.clone()),
         };
         Self::intialize_writer_loop(eth_for_writer_loop, l3_resp_recv_chan);
+        self.l4_packet_write_chan = Some(ipstack_writer);
         let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
         loop {
             unsafe {
@@ -289,7 +289,7 @@ impl Ethernet {
                 } else {
                     let raw_payload = buffer[0..res as usize].to_vec();
                     let eth_frame = EthernetFrame { data: raw_payload };
-                    self.process_frame(eth_frame, &ipstack_writer);
+                    self.process_frame(eth_frame);
                 }
             }
         }
@@ -310,7 +310,7 @@ impl Ethernet {
         }
     }
 
-    pub fn process_frame(&self, frame: EthernetFrame, ipstack_writer: &IPstackWriter) {
+    pub fn process_frame(&self, frame: EthernetFrame) {
         let eth_type = frame.ether_type();
 
         match EtherType::from_bytes(eth_type) {
@@ -318,7 +318,7 @@ impl Ethernet {
                 ARP::process_packet(self, frame);
             }
             EtherType::IPv4 => {
-                IPv4::process_packet(self, frame, ipstack_writer);
+                IPv4::process_packet(self, frame, self.l4_packet_write_chan.as_ref().unwrap());
             }
             _ => {}
         };

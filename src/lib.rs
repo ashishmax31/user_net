@@ -8,9 +8,9 @@ mod net_util;
 mod tap;
 pub mod udp_socket;
 use arp::ARP;
-use ethernet::{EtherType, Ethernet};
+use ethernet::Ethernet;
 
-pub fn show_error<T>(err: T) -> !
+fn show_error<T>(err: T) -> !
 where
     T: std::fmt::Display,
 {
@@ -22,7 +22,7 @@ pub fn start_stack() {
     let (fd, device) = tap::create_tap_device("tap1").unwrap();
 
     // Allow some time for the kernel to allocate the tun/tap device
-    thread::sleep(time::Duration::from_secs(2));
+    thread::sleep(time::Duration::from_secs(1));
 
     match tap::set_device_link_up(&device) {
         Ok(_) => (),
@@ -38,5 +38,9 @@ pub fn start_stack() {
         Ok(eth) => eth,
         Err(err) => show_error(err),
     };
-    eth.start_stack();
+    std::thread::spawn(move || {
+        eth.start_stack();
+    });
+    // Allow some time for the stack to get started before returning
+    thread::sleep(time::Duration::from_secs(5));
 }
