@@ -36,7 +36,7 @@ impl ethernet::LinkLayerWritable for ARP {
 
 // Reference: https://en.wikipedia.org/wiki/Address_Resolution_Protocol
 impl ARP {
-    pub fn process_packet(eth: &mut ethernet::Ethernet, frame: ethernet::EthernetFrame) {
+    pub fn process_packet(eth: &ethernet::Ethernet, frame: ethernet::EthernetFrame) {
         let received_arp_packet = ARP::build_packet(frame.payload().to_owned());
         match received_arp_packet.kind {
             ARPKind::Reply => {

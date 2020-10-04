@@ -14,7 +14,7 @@ pub struct IPstackWriter(std::sync::mpsc::Sender<Layer4Response>);
 pub struct Layer4Response {
     pub data: Vec<u8>,
     pub protocol: u8,
-    pub src_ethernet_frame: ethernet::EthernetFrame,
+    pub src_ip_header: IpHeader,
 }
 
 // No bit fields :(
@@ -31,9 +31,25 @@ pub struct IPv4 {
     ttl: u8,
     proto: Protocol,
     chksm: u16,
-    src: [u8; 4],
-    dst: [u8; 4],
+    pub src: [u8; 4],
+    pub dst: [u8; 4],
     data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IpHeader {
+    version: u8,
+    ihl: u8,
+    ecn: u8,
+    t_len: u16,
+    id: u16,
+    flags: u8,
+    frag_offset: u16,
+    ttl: u8,
+    pub proto: Protocol,
+    chksm: u16,
+    pub src: [u8; 4],
+    pub dst: [u8; 4],
 }
 
 const ICMP: u8 = 1;
@@ -69,6 +85,31 @@ impl ethernet::LinkLayerWritable for IPv4 {
 impl IPstackWriter {
     pub fn write(&self, packet_to_write: Layer4Response) {
         self.0.send(packet_to_write).unwrap();
+    }
+}
+
+impl IpHeader {
+    pub fn make_unfragmented_ip_header(
+        src_ip: ethernet::ProtocolAddr,
+        dst_ip: ethernet::ProtocolAddr,
+        proto: u8,
+        payload_len: u16,
+    ) -> Self {
+        let ihl = 5u8;
+        IpHeader {
+            version: 4,
+            ihl: ihl,
+            ecn: 0,
+            t_len: (payload_len + (ihl * 4) as u16),
+            id: 0,
+            flags: 0,
+            frag_offset: 0,
+            ttl: 50,
+            proto: set_proto(proto),
+            chksm: 0,
+            src: src_ip,
+            dst: dst_ip,
+        }
     }
 }
 
@@ -128,6 +169,23 @@ impl IPv4 {
         packet_buffer
     }
 
+    pub fn ip_header(&self) -> IpHeader {
+        IpHeader {
+            version: self.version,
+            ihl: self.ihl,
+            ecn: self.ecn,
+            t_len: self.t_len,
+            id: self.id,
+            flags: self.flags,
+            frag_offset: self.frag_offset,
+            ttl: self.ttl,
+            proto: self.proto,
+            chksm: self.chksm,
+            src: self.src,
+            dst: self.dst,
+        }
+    }
+
     pub fn src_str(&self) -> String {
         format!(
             "{}.{}.{}.{}",
@@ -144,12 +202,12 @@ impl IPv4 {
         }
     }
 
-    fn build_unfragmented_packet(src_packet: IPv4, payload: Vec<u8>, proto: u8) -> IPv4 {
+    fn build_unfragmented_packet(src_header: IpHeader, payload: Vec<u8>, proto: u8) -> IPv4 {
         let total_packet_len = (20 as usize + payload.len()) as u16;
         IPv4 {
             version: 04u8,
             ihl: 5u8, //No options field, so the header is always 20bytes.
-            ecn: src_packet.ecn,
+            ecn: src_header.ecn,
             t_len: total_packet_len,
             id: 0u16,
             flags: 0u8,
@@ -157,18 +215,18 @@ impl IPv4 {
             ttl: 50u8,
             proto: set_proto(proto),
             chksm: 0u16,
-            src: src_packet.dst,
-            dst: src_packet.src,
+            src: src_header.dst,
+            dst: src_header.src,
             data: payload,
         }
     }
 
-    fn build_ipv4_response(src_ip_packet: IPv4, payload: Vec<u8>, protocol: u8) -> IPv4 {
+    fn build_ipv4_response(src_ip_header: IpHeader, payload: Vec<u8>, protocol: u8) -> IPv4 {
         if (payload.len() as u32) > MTU {
             // Need to implement ip packet fragmenting
             unimplemented!()
         } else {
-            IPv4::build_unfragmented_packet(src_ip_packet, payload, protocol)
+            IPv4::build_unfragmented_packet(src_ip_header, payload, protocol)
         }
     }
 
@@ -213,16 +271,17 @@ pub fn initialize_ipv4_stack(eth_writer: ethernet::ChannelWriter) -> IPstackWrit
     IPstackWriter(tx)
 }
 
+
+// TODO: Implement graceful thread shutdown by implementing Drop for IPV4.
 fn intialize_writer_loop(
     eth_writer: ethernet::ChannelWriter,
     rx: std::sync::mpsc::Receiver<Layer4Response>,
 ) {
     thread::spawn(move || loop {
         let packet_to_write = rx.recv().unwrap();
-        let src_ip_packet =
-            IPv4::packet_from_net_bytes(packet_to_write.src_ethernet_frame.payload());
+        let src_ip_header = packet_to_write.src_ip_header;
         let ip_resp_packet = IPv4::build_ipv4_response(
-            src_ip_packet,
+            src_ip_header,
             packet_to_write.data,
             packet_to_write.protocol,
         );

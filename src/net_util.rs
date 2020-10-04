@@ -1,3 +1,4 @@
+use crate::ethernet::ProtocolAddr;
 use std::convert::TryInto;
 
 #[inline]
@@ -58,6 +59,13 @@ pub fn get_bits(byte: u8, rng: std::ops::Range<u8>) -> u8 {
     let and_arg = if start > 0 { and_arg << start } else { and_arg };
     // Finally right shift `start` times the and result to get the final result
     (byte & and_arg) >> start
+}
+
+pub fn addr_identifier(ip_address: ProtocolAddr, port: u16) -> String {
+    format!(
+        "{}.{}.{}.{}:{}",
+        ip_address[0], ip_address[1], ip_address[2], ip_address[3], port
+    )
 }
 
 #[cfg(test)]
