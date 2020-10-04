@@ -89,7 +89,7 @@ impl ICMP {
         let layer4_resp = ipv4::Layer4Response {
             data: icmp_reply,
             protocol: ICMP,
-            src_ethernet_frame: frame,
+            src_ip_header: ipv4_packet.ip_header(),
         };
         layer_3_writer.write(layer4_resp);
     }
