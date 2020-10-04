@@ -6,6 +6,7 @@ mod ethernet;
 mod ipv4;
 mod net_util;
 mod tap;
+pub mod udp_socket;
 use arp::ARP;
 use ethernet::{EtherType, Ethernet};
 

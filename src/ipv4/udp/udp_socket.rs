@@ -8,15 +8,21 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Condvar};
 
 // For lack of better options, using a global mutable states here.
 lazy_static! {
-    static ref SOCKETS: RwLock<HashMap<String, Arc<Mutex<UdpSocket>>>> =
+    static ref SOCKETS: RwLock<HashMap<String, Arc<(Mutex<UdpSockObj>, Condvar)>>> =
         RwLock::new(HashMap::new());
 }
 
 static mut LAYER3_WRITER: Option<IPstackWriter> = None;
+
+
+pub struct UdpSockObj {
+    pub sock: UdpSocket,
+    pub buff_empty: bool
+}
 
 pub struct UdpSocket {
     addr: std::net::SocketAddr,
@@ -45,7 +51,7 @@ pub struct SocketOutPut {
     src_udp_header: UdpHeader,
 }
 
-pub fn get_sock(identifier: &str) -> Option<std::sync::Arc<std::sync::Mutex<UdpSocket>>> {
+pub fn get_sock(identifier: &str) -> Option<std::sync::Arc<(Mutex<UdpSockObj>, Condvar)>> {
     let created_sockets = SOCKETS.read().unwrap();
     if created_sockets.contains_key(identifier) {
         let mutex_wrapped_socket = Arc::clone(created_sockets.get(identifier).unwrap());
@@ -87,28 +93,15 @@ impl UdpSocketIdentifier {
             Some(sock) => sock,
             None => return Err("Socket has become stale"),
         };
-        let mut retry = 0;
-        let recent_buff = loop {
-            if retry == 10000 {
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-                retry = 0;
-            }
-            if let Ok(mut sock) = mut_sock.try_lock() {
-                // println!("Got socket");
-                match sock.buffer.pop() {
-                    Some(packet) => {
-                        break packet;
-                    }
-                    None => {
-                        retry += 1;
-                        continue;
-                    }
-                };
-            }else{
-                retry += 1;
-            }
-        };
+        let (lock, cond_var) = &*mut_sock;
+        let mut sock = cond_var.wait_while(lock.lock().unwrap(), |sock_obj| {
+            sock_obj.buff_empty
+        }).unwrap();
 
+        let recent_buff = sock.sock.buffer.pop().unwrap();
+        if sock.sock.buffer.len() == 0 {
+            sock.buff_empty = true;
+        }
         let buf_len = buf.capacity();
         let received_ip_header = recent_buff.src_ip_header;
         let last_udp_packet = recent_buff.udp_packet;
@@ -145,14 +138,13 @@ impl UdpSocketIdentifier {
             Some(sk) => sk,
             None => panic!("Errored while trying to retreive the socket!"),
         };
-
+        let (mut_sock, _) = &*mut_sock;
         let mut sock = loop {
             if let Ok(mut sock) = mut_sock.try_lock() {
                 break sock;
             }
         };
-
-        sock.connected_sock = Some(identifier);
+        sock.sock.connected_sock = Some(identifier);
         Ok(())
     }
 
@@ -162,18 +154,20 @@ impl UdpSocketIdentifier {
             None => panic!("Errored while trying to retreive the socket!"),
         };
 
+        let (mut_sock, _) = &*mut_sock;
+
         let sock = loop {
             if let Ok(sock) = mut_sock.try_lock() {
                 break sock;
             }
         };
 
-        if let Some(remote_sock) = &sock.connected_sock {
+        if let Some(remote_sock) = &sock.sock.connected_sock {
             let (dst_ip, dst_port, src_ip, src_port) = (
                 remote_sock.ip(),
                 remote_sock.port(),
-                sock.sock_addr(),
-                sock.sock_port(),
+                sock.sock.sock_addr(),
+                sock.sock.sock_port(),
             );
             let (_, udp_resp_bytes) = UDP::create_packet(buf, src_port, dst_port, src_ip, dst_ip);
             let udp_len = udp_resp_bytes.len();
@@ -189,7 +183,7 @@ impl UdpSocketIdentifier {
                 protocol: UDP_PROTO,
                 src_ip_header: ip_header
             };
-            sock.write(l4_resp);
+            sock.sock.write(l4_resp);
             Ok(udp_len)
         } else {
             Err("Socket not connected to any remote socket!")
@@ -201,6 +195,7 @@ impl UdpSocketIdentifier {
             Some(sk) => sk,
             None => panic!("Errored while trying to retreive the socket!"),
         };
+        let (mut_sock, _) = &*mut_sock;
 
         let sock = loop {
             if let Ok(sock) = mut_sock.try_lock() {
@@ -211,12 +206,12 @@ impl UdpSocketIdentifier {
         let (dst_ip, dst_port, src_ip, src_port) = (
             src.src_ip_header.src,
             src.src_udp_header.src_port(),
-            sock.sock_addr(),
-            sock.sock_port(),
+            sock.sock.sock_addr(),
+            sock.sock.sock_port(),
         );
 
         let (_, udp_resp_bytes) = UDP::create_packet(buf, src_port, dst_port, src_ip, dst_ip);
-        sock.write(Layer4Response {
+        sock.sock.write(Layer4Response {
             data: udp_resp_bytes,
             protocol: UDP_PROTO,
             src_ip_header: src.src_ip_header,
@@ -303,7 +298,11 @@ impl UdpSocket {
                 layer_3_writer: Mutex::new(ip_stack_writer),
                 connected_sock: None,
             };
-            created_sockets.insert(identifier, Arc::new(Mutex::new(socket)));
+            let sock_obj = UdpSockObj{
+                sock: socket,
+                buff_empty: true
+            };
+            created_sockets.insert(identifier, Arc::new((Mutex::new(sock_obj), Condvar::new())));
         }
         Ok(())
     }
