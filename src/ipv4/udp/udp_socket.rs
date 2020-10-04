@@ -139,11 +139,7 @@ impl UdpSocketIdentifier {
             None => panic!("Errored while trying to retreive the socket!"),
         };
         let (mut_sock, _) = &*mut_sock;
-        let mut sock = loop {
-            if let Ok(mut sock) = mut_sock.try_lock() {
-                break sock;
-            }
-        };
+        let mut sock = mut_sock.lock().unwrap();
         sock.sock.connected_sock = Some(identifier);
         Ok(())
     }
@@ -156,11 +152,7 @@ impl UdpSocketIdentifier {
 
         let (mut_sock, _) = &*mut_sock;
 
-        let sock = loop {
-            if let Ok(sock) = mut_sock.try_lock() {
-                break sock;
-            }
-        };
+        let sock = mut_sock.lock().unwrap();
 
         if let Some(remote_sock) = &sock.sock.connected_sock {
             let (dst_ip, dst_port, src_ip, src_port) = (
@@ -197,11 +189,7 @@ impl UdpSocketIdentifier {
         };
         let (mut_sock, _) = &*mut_sock;
 
-        let sock = loop {
-            if let Ok(sock) = mut_sock.try_lock() {
-                break sock;
-            }
-        };
+        let sock = mut_sock.lock().unwrap();
         // we need to send the response back to where we received it from.
         let (dst_ip, dst_port, src_ip, src_port) = (
             src.src_ip_header.src,
