@@ -63,18 +63,19 @@ impl EtherType {
 }
 
 // This doesnt do anything useful now. Maybe later?
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 enum State {
     Ready,
     Reading,
 }
 
-#[derive(Clone)]
 pub struct Ethernet {
     socket: i32,
     status: State,
     address: HwAddr,
-    layer3_response_chan: ChannelWriter,
+    l3_resp_writer_chan: ChannelWriter,
+    l3_resp_recv_chan: Option<ChannelReceiver>,
+    l4_packet_write_chan: Option<IPstackWriter>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,41 +142,50 @@ impl Ethernet {
                     socket: fd,
                     status: State::Ready,
                     address: rand::thread_rng().gen::<HwAddr>(),
-                    layer3_response_chan: tx,
+                    l3_resp_writer_chan: tx,
+                    l3_resp_recv_chan: Some(rx),
+                    l4_packet_write_chan: None,
                 };
-
-                Self::intialize_writer_loop(eth.clone(), rx);
                 Ok(eth)
             }
             Err(err) => Err(err),
         }
     }
 
-    pub fn update_arp_cache(&mut self, protocol_addr: ProtocolAddr, hw_addr: HwAddr) {
+    pub fn update_arp_cache(&self, protocol_addr: ProtocolAddr, hw_addr: HwAddr) {
         let mut arp_cache_obj = ARP_CACHE.write().unwrap();
         arp_cache_obj.insert(protocol_addr, hw_addr);
     }
 
     pub fn arp_cache_exists(&self, protocol_addr: &ProtocolAddr) -> bool {
-        let arp_cache_obj = ARP_CACHE.read().unwrap();
-        arp_cache_obj.contains_key(protocol_addr)
+        if *protocol_addr == IP_ADDR {
+            true
+        } else {
+            let arp_cache_obj = ARP_CACHE.read().unwrap();
+            arp_cache_obj.contains_key(protocol_addr)
+        }
     }
 
     pub fn get_hw_addr_from_cache(&self, protocol_addr: &ProtocolAddr) -> HwAddr {
-        let arp_cache_obj = ARP_CACHE.read().unwrap();
-        *arp_cache_obj.get(protocol_addr).unwrap()
+        if *protocol_addr == IP_ADDR {
+            self.hw_address()
+        } else {
+            let arp_cache_obj = ARP_CACHE.read().unwrap();
+            *arp_cache_obj.get(protocol_addr).unwrap()
+        }
     }
 
     pub fn eth_layer_write(
         &self,
         payload: std::boxed::Box<dyn LinkLayerWritable + std::marker::Send>,
     ) -> Result<(), &'static str> {
-        match self.layer3_response_chan.send(payload) {
+        match self.l3_resp_writer_chan.send(payload) {
             Ok(_) => Ok(()),
             Err(_) => Err("Failed to write to the eth chan"),
         }
     }
 
+    // TODO: Implement graceful thread shutdown by implementing Drop for ethernet.
     fn intialize_writer_loop(eth: Ethernet, rx: ChannelReceiver) {
         thread::spawn(move || loop {
             let layer3_resp = rx.recv().unwrap();
@@ -192,9 +202,6 @@ impl Ethernet {
         } else {
             // Make an ARP request, then re-insert the layer3 response to the eth layer writer chan
             self.make_arp_req_for_addr(target_protocol_addr);
-            // Allow some time for the arp reply to come and get update the arp cache before
-            // re-inserting the layer3 response to the eth layer writer chan
-            thread::sleep(time::Duration::from_millis(10));
             self.eth_layer_write(layer_3_resp).unwrap();
         }
     }
@@ -219,10 +226,17 @@ impl Ethernet {
     }
 
     pub fn write_frame(&self, eth_frame: EthernetFrame) -> Result<(), &'static str> {
-        let mut response_frame_data = eth_frame.data;
-        match self.write_to_socket(response_frame_data) {
-            Ok(_) => Ok(()),
-            Err(err) => Err(err),
+        // Loopback behaviour
+        if eth_frame.dst() == self.hw_address() {
+            let l4_stack_writer =  self.l4_packet_write_chan.as_ref().unwrap();
+            self.process_frame(eth_frame, l4_stack_writer);
+            Ok(())
+        }else{
+            let response_frame_data = eth_frame.data;
+            match self.write_to_socket(response_frame_data) {
+                Ok(_) => Ok(()),
+                Err(err) => Err(err),
+            }
         }
     }
 
@@ -248,35 +262,22 @@ impl Ethernet {
         }
     }
 
-    pub fn read_from_socket(&self) -> (std::sync::mpsc::Receiver<EthernetFrame>, IPstackWriter) {
-        let mut buffer: Vec<u8> = vec![0; MTU as usize];
-        let fd = self.socket;
-        // self.set_socket_state(State::Reading);
-        let ipstack_writer = initialize_ipv4_stack(self.layer3_response_chan.clone());
-        let (tx, rx) = channel();
-        std::thread::spawn(move || loop {
-            let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
-            unsafe {
-                let res = libc::read(fd, buffer_ptr, buffer.capacity() as size_t);
-                if res < 0 {
-                    let err = errno::Errno::last();
-                    eprintln!("{}", err.desc());
-                    panic!(err.desc());
-                } else {
-                    let raw_payload = buffer[0..res as usize].to_vec();
-                    let eth_frame = EthernetFrame { data: raw_payload };
-                    tx.send(eth_frame).unwrap();
-                }
-            }
-        });
-        (rx, ipstack_writer)
-    }
-
     pub fn start_stack(&mut self) {
         let mut buffer: Vec<u8> = vec![0; MTU as usize];
         let fd = self.socket;
-        // self.set_socket_state(State::Reading);
-        let ipstack_writer = initialize_ipv4_stack(self.layer3_response_chan.clone());
+
+        let l3_resp_recv_chan = self.l3_resp_recv_chan.take().unwrap();
+        let ipstack_writer = initialize_ipv4_stack(self.l3_resp_writer_chan.clone());
+
+        let eth_for_writer_loop = Ethernet {
+            socket: self.socket,
+            status: self.status,
+            address: self.address,
+            l3_resp_writer_chan: self.l3_resp_writer_chan.clone(),
+            l3_resp_recv_chan: None,
+            l4_packet_write_chan: Some(ipstack_writer.clone())
+        };
+        Self::intialize_writer_loop(eth_for_writer_loop, l3_resp_recv_chan);
         let buffer_ptr = buffer.as_mut_ptr() as *mut c_void;
         loop {
             unsafe {
@@ -294,6 +295,7 @@ impl Ethernet {
         }
     }
 
+    //TODO: Buffered write to socket, potential bottleneck
     fn write_to_socket(&self, mut payload: Vec<u8>) -> Result<usize, &'static str> {
         let payload_buffer_ptr = payload.as_mut_ptr() as *mut c_void;
         unsafe {
@@ -308,7 +310,7 @@ impl Ethernet {
         }
     }
 
-    pub fn process_frame(&mut self, frame: EthernetFrame, ipstack_writer: &IPstackWriter) {
+    pub fn process_frame(&self, frame: EthernetFrame, ipstack_writer: &IPstackWriter) {
         let eth_type = frame.ether_type();
 
         match EtherType::from_bytes(eth_type) {
