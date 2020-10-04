@@ -50,8 +50,11 @@ impl UDP {
                 let identifier = net_util::addr_identifier(ethernet::IP_ADDR, datagram.dst_port());
                 match udp_socket::get_sock(&identifier) {
                     Some(mut_wrapped_sock) => {
-                        let mut sock = mut_wrapped_sock.lock().unwrap();
-                        sock.write_to_sockbuff(datagram, ip_header);
+                        let (lock, cond_var) = &*mut_wrapped_sock;
+                        let mut sock = lock.lock().unwrap();
+                        sock.sock.write_to_sockbuff(datagram, ip_header);
+                        sock.buff_empty = false;
+                        cond_var.notify_all();
                     }
                     None => {
                         // println!("UDP Port not open");
