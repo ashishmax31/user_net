@@ -15,6 +15,7 @@ As someone who has just started out doing systems programming(and Rust :D), I'm 
 ## TODO
 - IP packet fragmenting
 - TCP/IP
+- Add unit tests and integration tests
 - Tons of otherstuff :D
 
 ## Whats working right now?
@@ -62,6 +63,8 @@ fn start_client() {
 }
 
 ```
+![](_images/client_server.png)
+
 
 # Reference works 
 * [TUN/TAP device](https://backreference.org/2010/03/26/tuntap-interface-tutorial/)
