@@ -271,7 +271,6 @@ pub fn initialize_ipv4_stack(eth_writer: ethernet::ChannelWriter) -> IPstackWrit
     IPstackWriter(tx)
 }
 
-
 // TODO: Implement graceful thread shutdown by implementing Drop for IPV4.
 fn intialize_writer_loop(
     eth_writer: ethernet::ChannelWriter,

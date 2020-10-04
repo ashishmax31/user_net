@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex, RwLock, Condvar};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 // For lack of better options, using a global mutable states here.
 lazy_static! {
@@ -18,10 +18,9 @@ lazy_static! {
 
 static mut LAYER3_WRITER: Option<IPstackWriter> = None;
 
-
 pub struct UdpSockObj {
     pub sock: UdpSocket,
-    pub buff_empty: bool
+    pub buff_empty: bool,
 }
 
 pub struct UdpSocket {
@@ -94,9 +93,9 @@ impl UdpSocketIdentifier {
             None => return Err("Socket has become stale"),
         };
         let (lock, cond_var) = &*mut_sock;
-        let mut sock = cond_var.wait_while(lock.lock().unwrap(), |sock_obj| {
-            sock_obj.buff_empty
-        }).unwrap();
+        let mut sock = cond_var
+            .wait_while(lock.lock().unwrap(), |sock_obj| sock_obj.buff_empty)
+            .unwrap();
 
         let recent_buff = sock.sock.buffer.pop().unwrap();
         if sock.sock.buffer.len() == 0 {
@@ -164,16 +163,12 @@ impl UdpSocketIdentifier {
             let (_, udp_resp_bytes) = UDP::create_packet(buf, src_port, dst_port, src_ip, dst_ip);
             let udp_len = udp_resp_bytes.len();
 
-            let ip_header = IpHeader::make_unfragmented_ip_header(
-                        dst_ip,
-                        src_ip,
-                        UDP_PROTO,
-                        udp_len as u16,
-                    );
+            let ip_header =
+                IpHeader::make_unfragmented_ip_header(dst_ip, src_ip, UDP_PROTO, udp_len as u16);
             let l4_resp = Layer4Response {
                 data: udp_resp_bytes,
                 protocol: UDP_PROTO,
-                src_ip_header: ip_header
+                src_ip_header: ip_header,
             };
             sock.sock.write(l4_resp);
             Ok(udp_len)
@@ -286,9 +281,9 @@ impl UdpSocket {
                 layer_3_writer: Mutex::new(ip_stack_writer),
                 connected_sock: None,
             };
-            let sock_obj = UdpSockObj{
+            let sock_obj = UdpSockObj {
                 sock: socket,
-                buff_empty: true
+                buff_empty: true,
             };
             created_sockets.insert(identifier, Arc::new((Mutex::new(sock_obj), Condvar::new())));
         }
